@@ -1,0 +1,4 @@
+#!/bin/bash
+echo $$ > $1/cgroup.procs
+shift 1
+$@

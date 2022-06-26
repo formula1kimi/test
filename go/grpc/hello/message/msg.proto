@@ -1,0 +1,18 @@
+syntax="proto3";
+
+package msg;
+option go_package = "testgrpc/message";
+service Echo {
+    // Ping
+    rpc Ping(PingData) returns (PongData) {}
+}
+
+message PingData {
+    string name = 1;
+    int32 count = 2;
+}
+
+message PongData {
+    string name = 1;
+    int32 count = 2;
+}

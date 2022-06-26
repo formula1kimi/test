@@ -1,0 +1,15 @@
+#!/bin/bash
+
+function live_mount() {
+  local SRC=$1
+  local CONTAINER_AND_DEST=$2
+
+  CONTAINER=$(echo "$CONTAINER_AND_DEST" | awk -F':' '{print $1}')
+  DEST=$(echo "$CONTAINER_AND_DEST" | awk -F':' '{print $2}')
+
+  MERGED=$(docker inspect $CONTAINER | jq '.[].GraphDriver.Data.MergedDir' -r)
+  mkdir -p ${MERGED}/${DEST}
+  mount --bind $SRC ${MERGED}/$DEST
+}
+
+live_mount "$@"

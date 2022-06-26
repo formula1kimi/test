@@ -1,0 +1,5 @@
+#!/bin/bash
+
+iptables -A OUTPUT -m cgroup --cgroup 1000 -j LOG
+#iptables -D OUTPUT -m cgroup --cgroup 1000 -j LOG
+

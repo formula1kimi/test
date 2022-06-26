@@ -1,0 +1,3 @@
+CC=gcc CGO_CFLAGS="-I ./include" CGO_LDFLAGS="lib/libbpf.a" go build -o test -tags netgo,osusergo   -ldflags="-extldflags=-static" main.go
+
+clang  -g -O2  -static -g -Wall -Iinclude -target bpf -D__x86_64__ -c paitc_bpf_classifier.c -o paitc_bpf_classifier.o

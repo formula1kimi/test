@@ -1,0 +1,7 @@
+#!/bin/bash
+mkdir -vp /sys/fs/cgroup/cpu/c1
+mkdir -vp /sys/fs/cgroup/cpu/c2
+mkdir -vp /sys/fs/cgroup/cpu/c1/c11
+mkdir -vp /sys/fs/cgroup/cpu/c1/c12
+mkdir -vp /sys/fs/cgroup/cpu/c2/c21
+mkdir -vp /sys/fs/cgroup/cpu/c2/c22

@@ -1,0 +1,35 @@
+set -x
+#!/bin/bash
+iptables -t mangle -N OUT_1000
+iptables -t mangle -A OUTPUT -m cgroup --cgroup 1000 -j OUT_1000
+iptables -t mangle -A OUT_1000 -j MARK --set-mark 1000
+iptables -t mangle -A OUT_1000 -m state --state NEW -j CONNMARK --save-mark
+iptables -t mangle -A OUT_1000 -m state --state RELATED,ESTABLISHED -j CONNMARK --restore-mark
+
+iptables -t mangle -N OUT_2000
+iptables -t mangle -A OUTPUT -m cgroup --cgroup 2000 -j OUT_2000
+iptables -t mangle -A OUT_2000  -j MARK --set-mark 2000
+iptables -t mangle -A OUT_2000 -m state --state NEW -j CONNMARK --save-mark
+iptables -t mangle -A OUT_2000 -m state --state RELATED,ESTABLISHED -j CONNMARK --restore-mark
+
+iptables -t nat -A POSTROUTING -m addrtype --src-type LOCAL -j MASQUERADE
+
+#ip route add to 0.0.0.0/0 via 172.25.48.1 dev eth2 table 1000
+#ip route add to 172.25.48.0/20 dev eth2 table 1000 
+ip route add to 0.0.0.0/0 via 10.10.10.102 dev eth2 table 1000
+ip route add to 10.0.0.0/8 via 10.10.10.102 dev eth2 table 1000
+
+#ip route add to 0.0.0.0/0 via 172.25.48.1 dev eth3 table 2000
+#ip route add to 172.25.48.0/20 dev eth3 table 2000
+ip route add to 0.0.0.0/0 via 10.10.10.103 dev eth3 table 2000
+ip route add to 10.0.0.0/8 via 10.10.10.103 dev eth3 table 2000
+
+ip rule add fwmark 1000 table 1000
+ip rule add fwmark 2000 table 2000
+
+
+#mkdir -p /sys/fs/cgroup/net_cls/a
+#mkdir -p /sys/fs/cgroup/net_cls/b
+#echo 1000 > /sys/fs/cgroup/net_cls/a/net_cls.classid
+#echo 2000 > /sys/fs/cgroup/net_cls/b/net_cls.classid
+
