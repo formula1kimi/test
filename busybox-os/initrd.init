@@ -1,0 +1,14 @@
+#!/bin/sh
+
+echo "Mounting proc and sys..."
+mount -t sysfs sysfs /sys
+mount -t proc proc /proc
+mount -t devtmpfs devtmpfs /dev
+echo "Detect and export hardware infomation..."
+mdev -s
+echo "break here"
+echo "Mount real rootfs to /mnt/sysroot..."
+mount -t ext4 -o ro /dev/sda2 /mnt/sysroot
+
+echo "Switch to real rootfs..."
+exec chroot /mnt/sysroot /sbin/init

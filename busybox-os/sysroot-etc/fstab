@@ -1,0 +1,6 @@
+# device mount‐point type options dump fsck
+
+sysfs /sys sysfs defaults 0 0
+proc /proc proc defaults 0 0
+/dev/sda1 /boot ext4 defaults 0 0
+/dev/sda2 / ext4 defaults 1 1
