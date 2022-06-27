@@ -1,7 +1,7 @@
 #!/bin/bash 
 set -e -o pipefail
 
-NAME_PREFIX="net"
+NAME_PREFIX=
 function start_container() {
     local NAME=$1
     local IMAGE=$2
@@ -41,6 +41,9 @@ function init_container_net() {
     nsenter -t "$NETNS" -n ip link set "$DEVICE" up
     nsenter -t "$NETNS" -n ip route replace default via "$GW" dev "$DEVICE"
     nsenter -t "$NETNS" -n sysctl net.ipv4.ip_local_port_range="${PORT_RANGE/-/ }"
+    nsenter -t "$NETNS" -n sysctl net.ipv4.icmp_echo_ignore_all=1
+    nsenter -t "$NETNS" -n sysctl net.ipv4.conf.all.arp_ignore=8
+
     ip link set "$VETH" up
     set +x
 
@@ -149,13 +152,14 @@ function init_filter_ht() {
 function init() {
     local COUNT=$1
     local DEV=$2
-    local IMAGE=$3
-    if [ -z "$COUNT" ] || [ -z "$DEV" ] || [ -z "$IMAGE" ]; then
-        echo "Usage: init <count> <host dev> <image> [ cmds/args... ]"
-        echo "Example: init 2 eth0 ubuntu:20.04 tail -f /dev/null"
+    NAME_PREFIX=$3
+    local IMAGE=$4
+    if [ -z "$COUNT" ] || [ -z "$DEV" ] || [ -z "$NAME_PREFIX" ] || [ -z "$IMAGE" ]; then
+        echo "Usage: init <count> <host dev> <name-prefix> <image> [ cmds/args... ]"
+        echo "Example: init 2 eth0 net ubuntu:20.04 tail -f /dev/null"
         exit 1
     fi
-    shift 3
+    shift 4
 
     docker rm -f $NAME_PREFIX-{1..15} || true
     tc filter del dev "$DEV" ingress || true
