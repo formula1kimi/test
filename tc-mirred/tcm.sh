@@ -1,6 +1,14 @@
 #!/bin/bash 
 set -e -o pipefail
 
+#==================================
+# Changelogs
+#==================================
+# 2022/06/30: Version 0.6: First release
+
+VERSION="0.1"
+
+
 TYPE="nop"
 
 function log() {
@@ -563,6 +571,10 @@ function help() {
     exit 1
 }
 
+function version() {
+    log "$VERSION"
+}
+
 function main() {
     local ACTION=$1
     if [ -n "$ACTION" ]; then shift 1; fi
@@ -596,6 +608,9 @@ function main() {
         ;;
     "type")
         _type "$@"
+        ;;
+    "version")
+        version "$@"
         ;;
     *) help ;;
     esac
