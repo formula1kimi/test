@@ -1,9 +1,10 @@
 #!/bin/bash 
 set -e -o pipefail
 
-NAME_PREFIX="pai-box"
+TYPE="nop"
+
 function log() {
-    echo "$@" >&2
+    echo "tcm:" "$@" >&2
 }
 
 function start_port_byid() {
@@ -34,33 +35,33 @@ function init_container_net() {
     local DEVICE=$3
 
     GW=$(ip route | grep default | awk '{print $3}')
-    echo "Gateway: $GW"
+    log "Gateway: $GW"
 
     VETH="veth$IDX"
-    echo "Veth host: $VETH"
+    log "Veth host: $VETH"
 
     NETNS=$(docker inspect --format "{{.State.Pid}}" "${CONTAINER}")
-    echo "NetNS: $NETNS"
+    log "NetNS: $NETNS"
 
     IPADDR=$(ip -4 addr show dev "$DEVICE" | grep inet | awk '{print $2}')
     MACADDR=$(ip link show dev "$DEVICE" | grep link | awk '{print $2}')
-    echo "Veth peer IP: $IPADDR MAC: $MACADDR"
+    log "Veth peer IP: $IPADDR MAC: $MACADDR"
 
     local PORT_START
     PORT_START=$(start_port_byid "$IDX")
     local PORT_END
     PORT_END=$(end_port_byid "$IDX")
     local PORT_RANGE="$PORT_START $PORT_END"
-    echo "Use Port Range: $PORT_RANGE"
+    log "Use Port Range: $PORT_RANGE"
 
     # veth device can be removed when container is removed
-    if ip link show "$VETH" 2>/dev/null; then
-        echo "Remove old vethpair: $VETH"
+    if ip link show "$VETH" &>/dev/null; then
+        log "Remove old vethpair: $VETH"
         ip link del "$VETH"
     fi
-    echo "Create vethpair: $VETH <---> virtual $DEVICE"
+    log "Create vethpair: $VETH <---> virtual $DEVICE"
     ip link add "$VETH" type veth peer name "$DEVICE" netns "$NETNS"
-    echo "Setup container network interface: $VETH <---> virtual $DEVICE"
+    log "Setup container network interface: $VETH <---> virtual $DEVICE"
     nsenter -t "$NETNS" -n ip link set "$DEVICE"
     nsenter -t "$NETNS" -n ip addr add "$IPADDR" dev "$DEVICE"
     nsenter -t "$NETNS" -n ip link set dev "$DEVICE" address "$MACADDR"
@@ -72,7 +73,7 @@ function init_container_net() {
     ip link set "$VETH" up
 
     # [net]<--[egress (Host Dev)]<--!!REDIRECT!!<--[(veth host)ingress]<--vlink<--[egress (veth peer)]<--[process]
-    echo "Forward container ALL traffic from $CONTAINER to host $DEVICE"
+    log "Forward container ALL traffic from $CONTAINER to host $DEVICE"
     tc qdisc replace dev "$VETH" handle ffff: ingress
     tc filter replace dev "$VETH" parent ffff: protocol ip prio 1 u32 match u32 0 0 action mirred egress redirect dev "${DEVICE}"
     tc filter replace dev "$VETH" parent ffff: protocol arp u32 match u32 0 0 action mirred egress redirect dev "${DEVICE}"
@@ -85,12 +86,12 @@ function uninit_container_net() {
     local CONTAINER=$2
     local DEVICE=$3
     local VETH="veth$IDX"
-    echo "Veth host: $VETH"
+    log "Veth host: $VETH"
         
     NETNS=$(docker inspect --format "{{.State.Pid}}" "${CONTAINER}")
-    echo "NetNS: $NETNS"
+    log "NetNS: $NETNS"
 
-    echo "Remove vethpair: $VETH <---> virtual $DEVICE"
+    log "Remove vethpair: $VETH <---> virtual $DEVICE"
     ip link set "$VETH" down || true;
     ip link del "$VETH" || true;
 }
@@ -111,12 +112,12 @@ function add_dynamic_port_forward() {
     # dynamic port range forwarding started from 900
     local FIDX=$((900+IDX))
     if [ $FIDX -gt 999 ]; then
-        echo "Error, filter index for dynamic port forward exceed 999, abort"
+        log "Error, filter index for dynamic port forward exceed 999, abort"
         exit 1
     fi
 
     # [net]-->[ingress (Host Dev)]-->!!REDIRECT!!-->[(veth host)egress]-->vlink-->[ingress (veth peer) ]-->[process]
-    echo "Forward Dynamic port range $PORT_RANGE to boxid $IDX"
+    log "Forward Dynamic port range $PORT_RANGE to boxid $IDX"
     # Even use replace, must specify full handle id. 
     tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 1::$FIDX u32 ht 1: match tcp dst "$PORT_START" f000 action mirred egress redirect dev "$VETH"
     tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 ht 2: match udp dst "$PORT_START" f000 action mirred egress redirect dev "$VETH"
@@ -132,10 +133,10 @@ function remove_dynamic_port_forward() {
     # dynamic port range forwarding started from 900
     local FIDX=$((900+IDX))
     if [ $FIDX -gt 999 ]; then
-        echo "Error, filter index for dynamic port forward exceed 999, abort"
+        log "Error, filter index for dynamic port forward exceed 999, abort"
         exit 1
     fi
-    echo "Remove forward dynamic port range $PORT_RANGE from boxid $IDX"
+    log "Remove forward dynamic port range $PORT_RANGE from boxid $IDX"
     tc filter del dev "$DEVICE" parent ffff: protocol ip prio 1 handle 1::$FIDX u32 || true
     tc filter del dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 || true
 }
@@ -145,7 +146,7 @@ function add_arp_forward() {
     local DEVICE=$2
     local VETH="veth$IDX"
     local FILTER_CONTINUE=$3
-    echo "Add Mirror ARP to boxid: $IDX"
+    log "Add Mirror ARP to boxid: $IDX"
     # Even use replace, must specify full handle id. 
     tc filter replace dev "$DEVICE" parent ffff: protocol arp prio 4 handle 4::$IDX u32 ht 4: match u32 0 0 action mirred egress mirror dev "$VETH" $FILTER_CONTINUE
 }
@@ -154,7 +155,7 @@ function remove_arp_forward() {
     local IDX=$1
     local DEVICE=$2
     local VETH="veth$IDX"
-    echo "Remove Mirror ARP from boxid: $IDX"
+    log "Remove Mirror ARP from boxid: $IDX"
     tc filter del dev "$DEVICE" parent ffff: protocol arp prio 4 handle 4::$IDX u32 || true
 }
 
@@ -163,7 +164,7 @@ function add_icmp_forward() {
     local DEVICE=$2
     local VETH="veth$IDX"
     local FILTER_CONTINUE=$3
-    echo "Add Mirror ICMP to boxid: $IDX"
+    log "Add Mirror ICMP to boxid: $IDX"
     # Even use replace, must specify full handle id. 
     tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 3::$IDX u32 ht 3: match u32 0 0 action mirred egress mirror dev "$VETH" $FILTER_CONTINUE
 }
@@ -171,7 +172,7 @@ function add_icmp_forward() {
 function remove_icmp_forward() {
     local IDX=$1
     local DEVICE=$2
-    echo "Remove Mirror ICMP from boxid: $IDX"
+    log "Remove Mirror ICMP from boxid: $IDX"
     tc filter del dev "$DEVICE" parent ffff: protocol ip prio 1 handle 3::$IDX u32 || true
 }
 
@@ -179,9 +180,9 @@ function add_static_port_forward() {
     local IDX=$1
     local CONTAINER=$2
     local DEVICE=$3
-    VETH="veth$IDX"
-    STATIC_PORTS=$4
-    local STATIC_PORTS="${STATIC_PORTS/,/ }"
+    local VETH="veth$IDX"
+    # local STATIC_PORTS="${STATIC_PORTS/,/ }"
+    local STATIC_PORTS=$4
 
     # Filter id for staic port is determined by idx 1:1~49, then 2:50~99, and so on, each container have 50 idx space.
     # filter id 0 can not be used, so first container only have 49 filter available.
@@ -210,22 +211,22 @@ function add_static_port_forward() {
     fi
 
     if [ $FIDX -gt $FIDX_END ]; then
-        echo "Error, filter index for static port forward exceed $FIDX_END, abort"
+        log "Error, filter index for static port forward exceed $FIDX_END, abort"
         exit 1
     fi
 
 
     for PORT in ${STATIC_PORTS}; do 
-        echo "Mirror static port $PORT to container $CONTAINER" 
+        log "Redirect static port $PORT to container $CONTAINER" 
         if ! echo "$PORT" | grep -q -E '^[0-9]+$'; then
-            echo "Bad port number: $PORT, skip"
+            log "Bad port number: $PORT, skip"
             continue
         fi
         tc filter add dev "$DEVICE" parent ffff: protocol ip prio 1 handle 1::$FIDX u32 ht 1: match tcp dst "$PORT" 0xffff action mirred egress redirect dev "$VETH"
         tc filter add dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 ht 2: match udp dst "$PORT" 0xffff action mirred egress redirect dev "$VETH"
         FIDX=$((FIDX+1))
         if [ $FIDX -gt $FIDX_END ]; then
-            echo "Error, filter index for static port forward exceed $FIDX_END, abort"
+            log "Error, filter index for static port forward exceed $FIDX_END, abort"
             exit 1
         fi
     done
@@ -267,7 +268,7 @@ function init_host() {
     local DEVICE=$1
 
     if [ -z "$DEVICE" ]; then
-        echo "Error: device is not specified"
+        log "Error: device is not specified"
         exit 1
     fi
 
@@ -300,19 +301,19 @@ function skip_host_port_redirect() {
     fi
 
     if [ $FIDX -gt 899 ]; then
-        echo "Error, filter index for host port forward exceed 899, abort"
+        log "Error, filter index for host port forward exceed 899, abort"
         exit 1
     fi
-    echo "Host ports need skip redirect: $rule_ports"
+    log "Host ports need skip redirect: $rule_ports"
     for PORT in $rule_ports; do 
-        echo "skip redirect host port: $PORT" 
+        log "skip redirect host port: $PORT" 
         if ! echo "$PORT" | grep -q -E '^[0-9]+$'; then
-            echo "Bad port number: $PORT, skip"
+            log "Bad port number: $PORT, skip"
             continue
         fi
         # Check duplication
         if tc filter show dev "$DEVICE" ingress protocol ip pref 1 | grep '1::8[0-9][0-9]' -A1 | grep -q $(printf "%08x/0000ffff" $PORT); then
-            echo "  host port $PORT, already added rule"
+            log "  host port $PORT, already added rule"
             continue
         fi
  
@@ -320,7 +321,7 @@ function skip_host_port_redirect() {
         tc filter add dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 ht 2: match udp dst "$PORT" 0xffff action ok
         FIDX=$((FIDX+1))
         if [ $FIDX -gt 899 ]; then
-            echo "Error, filter index for host port forward exceed 899, abort"
+            log "Error, filter index for host port forward exceed 899, abort"
             exit 1
         fi
     done
@@ -330,7 +331,7 @@ function skip_host_port_redirect() {
 function init_filter_ht() {
     local DEVICE=$1
     if ! (tc qdisc show dev "$DEVICE" ingress | grep -q ingress); then
-        echo "Create $DEVICE ingress qdisc"
+        log "Create $DEVICE ingress qdisc"
         tc qdisc add dev "$DEVICE" handle ffff: ingress
     fi
  
@@ -360,7 +361,7 @@ function init_filter_ht() {
 function find_available_boxidx() {
     # find all box container, and their port range
     local containers
-    containers="$(docker ps | grep "$NAME_PREFIX" | awk '{print $1}')"
+    containers="$(docker ps | grep -v "^CONTAINER" | awk '{print $1}')"
     # generate port range list
     local all_ranges=()
     for i in {0..5}; do
@@ -373,7 +374,7 @@ function find_available_boxidx() {
     for c in $containers; do
         pid=$(docker inspect --format "{{.State.Pid}}" "$c")
         c_range=($(nsenter -t "$pid" -n sysctl -n net.ipv4.ip_local_port_range | awk '{print $1, $2}'))
-        echo "Running sandbox: ${containers[*]}, port-range: ${c_range[*]}" >&2
+        log "Container [$c] port-range: ${c_range[*]}" 
         for i in {0..5}; do
             r0=${all_ranges[i]}
             r1=$((all_ranges[i]+4095))
@@ -385,7 +386,7 @@ function find_available_boxidx() {
             fi
         done
     done
-    echo "Port Ranges: ${all_ranges[*]}" >&2
+    log "All Port Ranges: ${all_ranges[*]}" 
     # get smallest idx
     for i in {0..5}; do 
         if [ "${all_ranges[i]}" -ne "-1" ]; then
@@ -405,16 +406,12 @@ function add_box() {
     local NAME=$1
     local IMAGE=$2
     if [ -z "$NAME" ] || [ -z "$IMAGE" ]; then
-        echo "Usage: add-box <container name> <image> [ cmds/args... ]"
-        echo "Example: add-box net ubuntu:20.04 tail -f /dev/null"
+        log "Usage: add-box <container name> <image> [ cmds/args... ]"
+        log "Example: add-box net ubuntu:20.04 tail -f /dev/null"
         exit 1
     fi
     shift 2
 
-    if docker ps | grep -q "$NAME"; then
-        echo "Error, container $NAME is already exist."
-        exit 1;
-    fi
     start_container "$NAME" "$IMAGE" $@
 }
 
@@ -424,16 +421,27 @@ function init_box() {
     if [ -z "$DEV" ] || [ -z "$NAME" ] ; then
         help
     fi
+
+    # Always init the host fitler hash table.
+    init_host "$DEV"
  
     # Find a BOXID by prefix
     local BOXID
-    BOXID=$(find_available_boxidx "$NAME")
+    # The container may be already the inited box
+    BOXID=$(find_container_boxid "$NAME")
+    if [ -n "$BOXID" ]; then
+        log "This container already has valid port range and id: $BOXID"
+    else
+        log "Allocate new boxid for container: $NAME"
+        BOXID=$(find_available_boxidx)
+    fi
+
     if [ -z "$BOXID" ]; then 
-        echo "Can not find availble box id"
+        log "Can not use any availble box id"
         exit 1
     fi
 
-    echo "Using box idx: $BOXID for container: $NAME"
+    log "Using box idx: $BOXID for container: $NAME"
     init_container_net  "$BOXID" "$NAME" "$DEV" 
     add_dynamic_port_forward "$BOXID" "$DEV" 
     add_arp_forward "$BOXID" "$DEV" continue
@@ -451,7 +459,7 @@ function uninit_box() {
     local BOXID
     BOXID=$(find_container_boxid "$NAME")
     if [ -z "$BOXID" ]; then
-        echo "Error: Can not get boxid of container $NAME, make sure it's sandbox container"
+        log "Error: Can not get boxid of container $NAME, make sure it's sandbox container"
         exit 1
     fi
  
@@ -468,34 +476,42 @@ function find_container_boxid() {
     local CID
     CID="$(docker ps | grep "$NAME" | awk '{print $1}')"
     if [ -z "$CID" ]; then
-        echo "Error: Can not find container" >&2
+        log "Error: Can not find container" 
         return
     fi
-
+    # generate port range list
+    local all_ranges=()
+    for i in {0..5}; do
+        all_ranges[i]=$((8192+i*4096))
+    done
     local pid
     pid=$(docker inspect --format "{{.State.Pid}}" "${NAME}")
     c_range=($(nsenter -t "$pid" -n sysctl -n net.ipv4.ip_local_port_range | awk '{print $1, $2}'))
-    local idx
-    idx=$(((c_range[0] - 8192) / 4096 + 1))
-    echo $idx
+
+    if grep -q "${c_range[0]}" <<< "${all_ranges[*]}"; then
+        local idx
+        idx=$(((c_range[0] - 8192) / 4096 + 1))
+        echo $idx
+    fi
 }
 
-function add_port() {
-    local DEV=$1
-    local PORTS=$2
-    local NAME=$3
+function add_ports() {
+    local NAME=$1
+    local DEV=$2
+    shift 2
+    local PORTS="$*"
     if [ -z "$NAME" ] || [ -z "$DEV" ] || [ -z "$PORTS" ]; then
-        echo "Usage: add-port <host dev> <ports> <container name>"
-        echo "Example: add-port  eth0 3412,10456 net-1"
+        log "Usage: add-port <host dev> <ports> <container name>"
+        log "Example: add-port  eth0 3412,10456 net-1"
         exit 1
     fi
     local BOXID
     BOXID=$(find_container_boxid "$NAME")
     if [ -z "$BOXID" ]; then
-        echo "Error: Can not get boxid of container $NAME, make sure it's sandbox container"
+        log "Error: Can not get boxid of container $NAME, make sure it's sandbox container"
         exit 1
     fi
-    echo "Add static port to $NAME with id: $BOXID"
+    log "Add static port to $NAME with id: $BOXID"
     add_static_port_forward "$BOXID" "$NAME" "$DEV" "$PORTS"
 }
 
@@ -517,6 +533,22 @@ function set_link_down() {
     local C=$1
     local DEV=$2
     uninit_box "$DEV" "$C"
+}
+
+function check_link() {
+    local LOGTAG="check-link"
+    if [ ${#@} -ne 2 ]; then
+        log "$LOGTAG: usage: check-link pai-sbx-ubuntu-1 ppp0" 
+        exit 1
+    fi
+    local SANDBOX_CONTAINER=$1
+    local LINK=$2
+
+    log "$LOGTAG: nothing to do, args: $*"
+}
+
+function _type() {
+    echo "$TYPE"
 }
 
 function help() {
@@ -544,8 +576,11 @@ function main() {
     "init-box")
         init_box "$@"
         ;;
-    "add-port")
-        add_port "$@"
+    "uninit-box")
+        uninit_box "$@"
+        ;;
+    "add-ports")
+        add_ports "$@"
         ;;
     "set-link-up")
         init_box "$@"
@@ -557,10 +592,10 @@ function main() {
         check_link "$@"
         ;;
     "expose-ports")
-        expose_ports "$@"
+        add_ports "$@"
         ;;
     "type")
-        type "$@"
+        _type "$@"
         ;;
     *) help ;;
     esac

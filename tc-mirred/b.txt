@@ -1,0 +1,30 @@
+filter parent ffff: protocol ip pref 1 u32 chain 0 
+filter parent ffff: protocol ip pref 1 u32 chain 0 fh 3: ht divisor 32 
+filter parent ffff: protocol ip pref 1 u32 chain 0 fh 2: ht divisor 32 
+filter parent ffff: protocol ip pref 1 u32 chain 0 fh 2::800 order 2048 key ht 2 bkt 0 terminal flowid ??? not_in_hw 
+  match 00004e50/0000ffff at nexthdr+0
+	action order 1: gact action pass
+	 random type none pass val 0
+	 index 2 ref 1 bind 1
+
+filter parent ffff: protocol ip pref 1 u32 chain 0 fh 1: ht divisor 32 
+filter parent ffff: protocol ip pref 1 u32 chain 0 fh 1::800 order 2048 key ht 1 bkt 0 terminal flowid ??? not_in_hw 
+  match 00004e50/0000ffff at nexthdr+0
+	action order 1: gact action pass
+	 random type none pass val 0
+	 index 1 ref 1 bind 1
+
+filter parent ffff: protocol ip pref 1 u32 chain 0 fh 800: ht divisor 1 
+filter parent ffff: protocol ip pref 1 u32 chain 0 fh 800::1 order 1 key ht 800 bkt 0 link 1: not_in_hw 
+  match 00060000/00ff0000 at 8
+    offset 0f00>>6 at 0 
+filter parent ffff: protocol ip pref 1 u32 chain 0 fh 800::2 order 2 key ht 800 bkt 0 link 2: not_in_hw 
+  match 00110000/00ff0000 at 8
+    offset 0f00>>6 at 0 
+filter parent ffff: protocol ip pref 1 u32 chain 0 fh 800::3 order 3 key ht 800 bkt 0 link 3: not_in_hw 
+  match 00010000/00ff0000 at 8
+filter parent ffff: protocol arp pref 4 u32 chain 0 
+filter parent ffff: protocol arp pref 4 u32 chain 0 fh 4: ht divisor 32 
+filter parent ffff: protocol arp pref 4 u32 chain 0 fh 801: ht divisor 1 
+filter parent ffff: protocol arp pref 4 u32 chain 0 fh 801::1 order 1 key ht 801 bkt 0 link 4: not_in_hw 
+  match 00000000/00000000 at 0
