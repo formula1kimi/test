@@ -472,20 +472,20 @@ function uninit_box() {
 }
 
 function find_container_boxid() {
-    local NAME=$1
-    local CID
-    CID="$(docker ps | grep "$NAME" | awk '{print $1}')"
-    if [ -z "$CID" ]; then
-        log "Error: Can not find container" 
-        return
-    fi
-    # generate port range list
+    local NAME_OR_ID=$1
+   # generate port range list
     local all_ranges=()
     for i in {0..5}; do
         all_ranges[i]=$((8192+i*4096))
     done
+
     local pid
-    pid=$(docker inspect --format "{{.State.Pid}}" "${NAME}")
+    pid=$(docker inspect --format "{{.State.Pid}}" "${NAME_OR_ID}")
+    if [ -z "$pid" ]; then
+        log "Error: Can not find container: $NAME_OR_ID" 
+        return
+    fi
+ 
     c_range=($(nsenter -t "$pid" -n sysctl -n net.ipv4.ip_local_port_range | awk '{print $1, $2}'))
 
     if grep -q "${c_range[0]}" <<< "${all_ranges[*]}"; then
