@@ -83,6 +83,7 @@ function init_container_net() {
     _nsenter -t "$NETNS" -n ip addr add "$IPADDR" dev "$DEVICE"
     _nsenter -t "$NETNS" -n ip link set dev "$DEVICE" address "$MACADDR"
     _nsenter -t "$NETNS" -n ip link set "$DEVICE" up
+    _nsenter -t "$NETNS" -n ip route replace "$GW" dev "$DEVICE"
     _nsenter -t "$NETNS" -n ip route replace default via "$GW" dev "$DEVICE"
     _nsenter -t "$NETNS" -n sysctl net.ipv4.ip_local_port_range="${PORT_RANGE/-/ }"
     _nsenter -t "$NETNS" -n sysctl net.ipv4.icmp_echo_ignore_all=1
@@ -496,7 +497,7 @@ function uninit_box() {
     fi
 
     if [ "$DEV" == "ALL" ]; then
-        DEVICE=$(find_netdev)
+        DEV=$(find_netdev)
         log "ALL interface: $DEV"
     fi
 
