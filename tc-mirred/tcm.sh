@@ -6,10 +6,14 @@ set -e -o pipefail
 #==================================
 # 2022/06/30: Version 0.6: First release
 
-VERSION="0.1"
+VERSION="0.6"
 
 
 TYPE="nop"
+
+function _nsenter() {
+    /usr/bin/nsenter "$@"
+}
 
 function log() {
     echo "tcm:" "$@" >&2
@@ -33,55 +37,60 @@ function start_container() {
     docker run -d --privileged --name "${NAME}"  --network none "$IMAGE" $@
 }
 
+function find_netdev() {
+    ip route show | grep default | grep -o -E "dev [^ ]+ " | awk '{print $2}'
+}
+
 # arg1: boxid
 # arg2: container name
 # arg3: device
 function init_container_net() {
+    log ">>> INIT-CONTAINER-NET"
     local IPADDR MACADDR GW VETH
     local IDX=$1
     local CONTAINER=$2
     local DEVICE=$3
 
     GW=$(ip route | grep default | awk '{print $3}')
-    log "Gateway: $GW"
+    log "  Gateway: $GW"
 
     VETH="veth$IDX"
-    log "Veth host: $VETH"
+    log "  Veth host: $VETH"
 
     NETNS=$(docker inspect --format "{{.State.Pid}}" "${CONTAINER}")
-    log "NetNS: $NETNS"
+    log "  NetNS: $NETNS"
 
     IPADDR=$(ip -4 addr show dev "$DEVICE" | grep inet | awk '{print $2}')
     MACADDR=$(ip link show dev "$DEVICE" | grep link | awk '{print $2}')
-    log "Veth peer IP: $IPADDR MAC: $MACADDR"
+    log "  Veth peer IP: $IPADDR MAC: $MACADDR"
 
     local PORT_START
     PORT_START=$(start_port_byid "$IDX")
     local PORT_END
     PORT_END=$(end_port_byid "$IDX")
     local PORT_RANGE="$PORT_START $PORT_END"
-    log "Use Port Range: $PORT_RANGE"
+    log "  Use Port Range: $PORT_RANGE"
 
     # veth device can be removed when container is removed
     if ip link show "$VETH" &>/dev/null; then
-        log "Remove old vethpair: $VETH"
+        log "  Remove old vethpair: $VETH"
         ip link del "$VETH"
     fi
-    log "Create vethpair: $VETH <---> virtual $DEVICE"
+    log "  Create vethpair: $VETH <---> virtual $DEVICE"
     ip link add "$VETH" type veth peer name "$DEVICE" netns "$NETNS"
-    log "Setup container network interface: $VETH <---> virtual $DEVICE"
-    nsenter -t "$NETNS" -n ip link set "$DEVICE"
-    nsenter -t "$NETNS" -n ip addr add "$IPADDR" dev "$DEVICE"
-    nsenter -t "$NETNS" -n ip link set dev "$DEVICE" address "$MACADDR"
-    nsenter -t "$NETNS" -n ip link set "$DEVICE" up
-    nsenter -t "$NETNS" -n ip route replace default via "$GW" dev "$DEVICE"
-    nsenter -t "$NETNS" -n sysctl net.ipv4.ip_local_port_range="${PORT_RANGE/-/ }"
-    nsenter -t "$NETNS" -n sysctl net.ipv4.icmp_echo_ignore_all=1
-    nsenter -t "$NETNS" -n sysctl net.ipv4.conf.all.arp_ignore=8
+    log "  Setup container network interface: $VETH <---> virtual $DEVICE"
+    _nsenter -t "$NETNS" -n ip link set "$DEVICE"
+    _nsenter -t "$NETNS" -n ip addr add "$IPADDR" dev "$DEVICE"
+    _nsenter -t "$NETNS" -n ip link set dev "$DEVICE" address "$MACADDR"
+    _nsenter -t "$NETNS" -n ip link set "$DEVICE" up
+    _nsenter -t "$NETNS" -n ip route replace default via "$GW" dev "$DEVICE"
+    _nsenter -t "$NETNS" -n sysctl net.ipv4.ip_local_port_range="${PORT_RANGE/-/ }"
+    _nsenter -t "$NETNS" -n sysctl net.ipv4.icmp_echo_ignore_all=1
+    _nsenter -t "$NETNS" -n sysctl net.ipv4.conf.all.arp_ignore=8
     ip link set "$VETH" up
 
     # [net]<--[egress (Host Dev)]<--!!REDIRECT!!<--[(veth host)ingress]<--vlink<--[egress (veth peer)]<--[process]
-    log "Forward container ALL traffic from $CONTAINER to host $DEVICE"
+    log "  Forward container ALL traffic from $CONTAINER to host $DEVICE"
     tc qdisc replace dev "$VETH" handle ffff: ingress
     tc filter replace dev "$VETH" parent ffff: protocol ip prio 1 u32 match u32 0 0 action mirred egress redirect dev "${DEVICE}"
     tc filter replace dev "$VETH" parent ffff: protocol arp u32 match u32 0 0 action mirred egress redirect dev "${DEVICE}"
@@ -90,6 +99,7 @@ function init_container_net() {
 }   
 
 function uninit_container_net() {
+    log ">>> uninit_container_net"
     local IDX=$1
     local CONTAINER=$2
     local DEVICE=$3
@@ -273,12 +283,19 @@ function remove_static_port_forward() {
 }
 
 function init_host() {
+    log ">>> INIT-HOST"
     local DEVICE=$1
+
+    if [ "$DEVICE" == "ALL" ]; then
+        DEVICE=$(find_netdev)
+        log "ALL interface: $DEVICE"
+    fi
 
     if [ -z "$DEVICE" ]; then
         log "Error: device is not specified"
         exit 1
     fi
+
 
     # Adjust port range to 32768,60999, which is default settings.
     sysctl net.ipv4.ip_local_port_range="32768 60999"
@@ -300,7 +317,7 @@ function skip_host_port_redirect() {
             rule_ports+="$port "
         fi
     done
-            
+
     FIDX=$(tc filter  show dev "$DEVICE" ingress  protocol ip pref 1 | (grep -E -o "1::8[0-9][0-9] " || true) | cut -b4- | sort -n | tail -n1)
     if [ -z "$FIDX" ]; then
         FIDX=800
@@ -312,6 +329,7 @@ function skip_host_port_redirect() {
         log "Error, filter index for host port forward exceed 899, abort"
         exit 1
     fi
+
     log "Host ports need skip redirect: $rule_ports"
     for PORT in $rule_ports; do 
         log "skip redirect host port: $PORT" 
@@ -337,6 +355,7 @@ function skip_host_port_redirect() {
 }
 
 function init_filter_ht() {
+    log ">>> INIT-FILTER-HASHTABLE"
     local DEVICE=$1
     if ! (tc qdisc show dev "$DEVICE" ingress | grep -q ingress); then
         log "Create $DEVICE ingress qdisc"
@@ -381,8 +400,8 @@ function find_available_boxidx() {
     local c_range
     for c in $containers; do
         pid=$(docker inspect --format "{{.State.Pid}}" "$c")
-        c_range=($(nsenter -t "$pid" -n sysctl -n net.ipv4.ip_local_port_range | awk '{print $1, $2}'))
-        log "Container [$c] port-range: ${c_range[*]}" 
+        c_range=($(_nsenter -t "$pid" -n sysctl -n net.ipv4.ip_local_port_range | awk '{print $1, $2}'))
+        #log "Container [$c] already has port-range: ${c_range[*]}" 
         for i in {0..5}; do
             r0=${all_ranges[i]}
             r1=$((all_ranges[i]+4095))
@@ -394,7 +413,7 @@ function find_available_boxidx() {
             fi
         done
     done
-    log "All Port Ranges: ${all_ranges[*]}" 
+    log "Port Ranges Map: ${all_ranges[*]}" 
     # get smallest idx
     for i in {0..5}; do 
         if [ "${all_ranges[i]}" -ne "-1" ]; then
@@ -424,16 +443,28 @@ function add_box() {
 }
 
 function init_box() {
+    log ">>> INIT BOX"
     local NAME=$1
     local DEV=$2
     if [ -z "$DEV" ] || [ -z "$NAME" ] ; then
         help
     fi
 
+    if ! docker ps --format "{{.ID}} {{.Names}}" | grep -q "$NAME"; then 
+        log "Error: can not find container"
+        exit 1
+    fi
+
+    if [ "$DEV" == "ALL" ]; then
+        DEV=$(find_netdev)
+        log "ALL interface: $DEV"
+    fi
+
+
     # Always init the host fitler hash table.
     init_host "$DEV"
  
-    # Find a BOXID by prefix
+    log "Find boxid for the container..."
     local BOXID
     # The container may be already the inited box
     BOXID=$(find_container_boxid "$NAME")
@@ -457,11 +488,18 @@ function init_box() {
 }
 
 function uninit_box() {
+    log ">>> UNINIT-BOX"
     local NAME=$1
     local DEV=$2
     if [ -z "$DEV" ] || [ -z "$NAME" ] ; then
         help
     fi
+
+    if [ "$DEV" == "ALL" ]; then
+        DEVICE=$(find_netdev)
+        log "ALL interface: $DEV"
+    fi
+
 
     # Find a BOXID by prefix
     local BOXID
@@ -493,12 +531,11 @@ function find_container_boxid() {
         log "Error: Can not find container: $NAME_OR_ID" 
         return
     fi
- 
-    c_range=($(nsenter -t "$pid" -n sysctl -n net.ipv4.ip_local_port_range | awk '{print $1, $2}'))
+    port_range_start="$(_nsenter -t "$pid" -n sysctl -n net.ipv4.ip_local_port_range | awk '{print $1}')"
 
-    if grep -q "${c_range[0]}" <<< "${all_ranges[*]}"; then
+    if [ -n "$port_range_start" ] && grep -q "$port_range_start" <<< "${all_ranges[*]}"; then
         local idx
-        idx=$(((c_range[0] - 8192) / 4096 + 1))
+        idx=$(((port_range_start - 8192) / 4096 + 1))
         echo $idx
     fi
 }
@@ -513,6 +550,12 @@ function add_ports() {
         log "Example: add-port  eth0 3412,10456 net-1"
         exit 1
     fi
+
+    if [ "$DEV" == "ALL" ]; then
+        DEV=$(find_netdev)
+        log "ALL interface: $DEV"
+    fi
+
     local BOXID
     BOXID=$(find_container_boxid "$NAME")
     if [ -z "$BOXID" ]; then
