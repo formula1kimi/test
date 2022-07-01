@@ -8,7 +8,7 @@ set -e -o pipefail
 
 VERSION="0.6"
 
-
+NAME_PREFIX="pai-box"
 TYPE="nop"
 
 function _nsenter() {
@@ -195,6 +195,7 @@ function remove_icmp_forward() {
     tc filter del dev "$DEVICE" parent ffff: protocol ip prio 1 handle 3::$IDX u32 || true
 }
 
+
 function add_static_port_forward() {
     local IDX=$1
     local CONTAINER=$2
@@ -273,14 +274,13 @@ function remove_static_port_forward() {
             D="[0-4]?[0-9]"
         fi
     fi
-
     FIDXS=$(tc filter  show dev "$DEVICE" ingress  protocol ip pref 1 | (grep -E -o "1::$H$D " || true) | cut -b4- | sort -n)
+    FIDXS="${FIDXS//$'\n'/ }"
     log "Remove filter ids for staitc port forward: $FIDXS"
     for FIDX in $FIDXS; do 
         tc filter del dev "$DEVICE" ingress protocol ip pref 1 handle 1::$FIDX u32
         tc filter del dev "$DEVICE" ingress protocol ip pref 1 handle 2::$FIDX u32
     done
-
 }
 
 function init_host() {
@@ -355,6 +355,27 @@ function skip_host_port_redirect() {
  
 }
 
+function update_reserved_ports() {
+    local DEV=$1
+    local reserved_hex_ports
+    reserved_hex_ports=$(tc filter show dev $DEV ingress | (grep -E "fh 1::([0-9] |[0-9][0-9] |[0-7][0-9][0-9] )" -A1 || true) | awk '/match/ { if(match($0, "([0-9a-f]{8})/", a)) print a[1]}')
+    reserved_hex_ports=${reserved_hex_ports//$'\n'/ }
+    local reserved_ports
+    for p in $reserved_hex_ports; do
+        reserved_ports+="$(printf %d 0x$p),"
+    done
+    reserved_ports="${reserved_ports%,*}"
+    log "Update Host Reserved Ports: $reserved_ports"
+    sysctl net.ipv4.ip_local_reserved_ports="$reserved_ports"
+
+    boxes=$(find_all_box)
+    for box in $boxes; do
+        log "Update $box's Reserved Ports: $reserved_ports"
+        pid=$(docker inspect --format "{{.State.Pid}}" "$box")
+        _nsenter -t "$pid" -n sysctl net.ipv4.ip_local_reserved_ports="$reserved_ports"
+    done
+}
+
 function init_filter_ht() {
     log ">>> INIT-FILTER-HASHTABLE"
     local DEVICE=$1
@@ -386,10 +407,17 @@ function init_filter_ht() {
 
 }
 
+function find_all_box() {
+    local boxes
+    boxes=$(docker ps | awk '//{if (match($NF, "^'"$NAME_PREFIX"'-.*$", a)) print a[0]}')
+    boxes=${boxes//$'\n'/ }
+    echo "$boxes"
+}
+
 function find_available_boxidx() {
     # find all box container, and their port range
     local containers
-    containers="$(docker ps | grep -v "^CONTAINER" | awk '{print $1}')"
+    containers="$(find_all_box)"
     # generate port range list
     local all_ranges=()
     for i in {0..5}; do
@@ -440,7 +468,7 @@ function add_box() {
     fi
     shift 2
 
-    start_container "$NAME" "$IMAGE" $@
+    start_container "$NAME" "$IMAGE" "$@"
 }
 
 function init_box() {
@@ -516,6 +544,7 @@ function uninit_box() {
     remove_arp_forward "$BOXID" "$DEV"
     remove_icmp_forward "$BOXID" "$DEV"
     remove_static_port_forward "$BOXID" "$DEV"
+    update_reserved_ports "$DEV"
 }
 
 function find_container_boxid() {
@@ -565,6 +594,8 @@ function add_ports() {
     fi
     log "Add static port to $NAME with id: $BOXID"
     add_static_port_forward "$BOXID" "$NAME" "$DEV" "$PORTS"
+
+    update_reserved_ports "$DEV"
 }
 
 #===========================================================
