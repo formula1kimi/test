@@ -16,7 +16,7 @@ function _nsenter() {
 }
 
 function log() {
-    echo "tcm:" "$@" >&2
+    echo -e "tcm:" "$@" >&2
 }
 
 function start_port_byid() {
@@ -598,6 +598,83 @@ function add_ports() {
     update_reserved_ports "$DEV"
 }
 
+
+function list() {
+    local DEV=$1
+
+    if [ -z "$DEV" ]; then
+        log "net dev is not specified"
+        exit 1
+    fi
+
+    # Merge multiple lines to single one for one filter item.
+    LINES=()
+    MLINE=
+    while read -r LINE; do
+        if [[ "$LINE" =~ ^filter ]]; then
+            if [ -n "$MLINE" ]; then LINES+=("$MLINE"); fi
+            MLINE="$LINE"
+        else 
+            MLINE+=" $LINE"
+        fi
+    done <<< "$(tc filter show dev $DEV ingress)"
+    log "==========================$DEV======================="
+    for LINE in "${LINES[@]}"; do
+        if [[ "$LINE" =~ fh[[:space:]]+(1::[0-9]?[0-9][[:space:]]|1::[1-7][0-9][0-9][[:space:]]).*match[[:space:]]([0-9a-f]{8}/[0-9a-f]{8}).*mirred[[:space:]]\((.*)\) ]]; then
+            log "${BASH_REMATCH[1]}\t TCP REDIRECT PORT: ${BASH_REMATCH[2]}, ACTION: ${BASH_REMATCH[3]}"
+        fi
+    done
+
+    for LINE in "${LINES[@]}"; do
+        if [[ "$LINE" =~ fh[[:space:]]+(1::8[0-9][0-9][[:space:]]).*match[[:space:]]([0-9a-f]{8}/[0-9a-f]{8}).*gact[[:space:]]action[[:space:]](.*)[[:space:]]random ]]; then
+            log "${BASH_REMATCH[1]}\t TCP RESERVED PORT: ${BASH_REMATCH[2]}, ACTION: ${BASH_REMATCH[3]}"
+        fi
+    done
+
+    for LINE in "${LINES[@]}"; do
+        if [[ "$LINE" =~ fh[[:space:]]+(1::9[0-9][0-9]).*match[[:space:]]([0-9a-f]{8}/[0-9a-f]{8}).*mirred[[:space:]]\((.*)\) ]]; then
+            log "${BASH_REMATCH[1]}\t TCP DYNAMIC PORT: ${BASH_REMATCH[2]}, ACTION: ${BASH_REMATCH[3]}"
+        fi
+    done
+
+    for LINE in "${LINES[@]}"; do
+        if [[ "$LINE" =~ fh[[:space:]]+(2::[0-9]?[0-9][[:space:]]|1::[1-7][0-9][0-9][[:space:]]).*match[[:space:]]([0-9a-f]{8}/[0-9a-f]{8}).*mirred[[:space:]]\((.*)\) ]]; then
+            log "${BASH_REMATCH[1]}\t UDP REDIRECT PORT: ${BASH_REMATCH[2]}, ACTION: ${BASH_REMATCH[3]}"
+        fi
+    done
+
+    for LINE in "${LINES[@]}"; do
+        if [[ "$LINE" =~ fh[[:space:]]+(2::8[0-9][0-9][[:space:]]).*match[[:space:]]([0-9a-f]{8}/[0-9a-f]{8}).*gact[[:space:]]action[[:space:]](.*)[[:space:]]random ]]; then
+            log "${BASH_REMATCH[1]}\t UDP RESERVED PORT: ${BASH_REMATCH[2]}, ACTION: ${BASH_REMATCH[3]}"
+        fi
+    done
+
+    for LINE in "${LINES[@]}"; do
+        if [[ "$LINE" =~ fh[[:space:]]+(2::9[0-9][0-9]).*match[[:space:]]([0-9a-f]{8}/[0-9a-f]{8}).*mirred[[:space:]]\((.*)\) ]]; then
+            log "${BASH_REMATCH[1]}\t UDP DYNAMIC PORT: ${BASH_REMATCH[2]}, ACTION: ${BASH_REMATCH[3]}"
+        fi
+    done
+
+    for LINE in "${LINES[@]}"; do
+        if [[ "$LINE" =~ fh[[:space:]]+(3::[0-9]+[[:space:]]).*mirred[[:space:]]\((.*)\) ]]; then
+            log "${BASH_REMATCH[1]}\t ICMP ACTION: ${BASH_REMATCH[2]}"
+        fi
+    done
+
+   for LINE in "${LINES[@]}"; do
+        if [[ "$LINE" =~ fh[[:space:]]+(4::[0-9]+[[:space:]]).*mirred[[:space:]]\((.*)\) ]]; then
+            log "${BASH_REMATCH[1]}\t ARP ACTION: ${BASH_REMATCH[2]}"
+        fi
+    done
+
+
+
+
+
+
+
+}
+
 #===========================================================
 # interface function for integration with InstMgr
 #===========================================================
@@ -654,6 +731,9 @@ function main() {
     local ACTION=$1
     if [ -n "$ACTION" ]; then shift 1; fi
     case $ACTION in 
+    "list")
+        list "$@"
+        ;;
     "init-host")
         init_host "$@"
         ;;
