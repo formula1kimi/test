@@ -6,38 +6,33 @@ ARCH := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/' | sed 's
 # Use our own libbpf API headers and Linux UAPI headers distributed with
 # libbpf to avoid dependency on system-wide headers, which could be missing or
 # outdated
-INCLUDES := -Ilibbpf/src/root/usr/include 
+INCLUDES := -Ilibbpf/src/_output/usr/include 
 CFLAGS := -static -g -Wall
-LDFLAGS := -Llibbpf/src/root/usr/lib64
+LDFLAGS := -Llibbpf/src/_output/usr/lib64
 
-APPS = example traffic tracepoint
+APPS = example traffic tracepoint xdp_redirect
 
 .PHONY: all
 all: $(APPS)
 
 .PHONY: clean
 clean:
-	$(call msg,CLEAN)
 	$(Q)rm -rf $(OUTPUT) $(APPS) *.bpf.o
 
 $(OUTPUT):
-	$(call msg,MKDIR,$@)
 	$(Q)mkdir -p $@
 
 # Build BPF code
 %.bpf.o: %.bpf.c 
-	$(call msg,BPF,$@)
 	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) $(INCLUDES) -c $(filter %.c,$^) -o $@
 	$(Q)$(LLVM_STRIP) -g $@ # strip useless DWARF info
 
 
 $(OUTPUT)/%.o: %.c $(wildcard %.h) | $(OUTPUT)
-	$(call msg,CC,$@)
 	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
 
 # Build application binary
-$(APPS): %: $(OUTPUT)/%.o | %.bpf.o $(OUTPUT)
-	$(call msg,BINARY,$@)
+$(APPS): %: $(OUTPUT)/%.o  | %.bpf.o  $(OUTPUT)
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $^ -lbpf -lelf -lz -o $@
 
 # delete failed targets

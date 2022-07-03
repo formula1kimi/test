@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /* Copyright (c) 2020 Facebook */
-//#include "vmlinux.h"
+
+/*
+ * This example demo how to use kprobe to watch the write syscall
+ * log the writing data filtered by pid and fd.
+ */
+
 #define __KERNEL__
+
+// This is kernel's bpf include file, contains bpf syscall and helper function for userspace program.
 #include <linux/bpf.h>
+// This is libbpf's include files, under libbpf's include folder.
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
