@@ -9,16 +9,18 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
  * General Public License for more details.
  */
-/*
+#define KBUILD_MODNAME "foo"
+#include <linux/bpf.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
 #include <linux/if_vlan.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
-*/
-#include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
+
+typedef unsigned int u32;
+typedef unsigned long long u64;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -36,6 +38,26 @@ struct {
 	__type(value, long);
 	__uint(max_entries, 1);
 } rxcnt SEC(".maps");
+
+static void change_src(void *data) 
+{
+	unsigned char *p = data;
+	p[6] = 0x00;
+	p[7] = 0x15;
+	p[8] = 0x5d;
+	p[9] = 0x01;
+	p[10] = 0x0d;
+	p[11] = 0x20;
+
+	/*
+	p[0] = 0x00;
+	p[1] = 0x15;
+	p[2] = 0x5d;
+	p[3] = 0x01;
+	p[4] = 0x0d;
+	p[5] = 0x21;
+	*/
+}
 
 static void swap_src_dst_mac(void *data)
 {
@@ -77,19 +99,15 @@ int xdp_redirect_prog(struct xdp_md *ctx)
 	if (value)
 		*value += 1;
 
-	swap_src_dst_mac(data);
-	int r=0;
-	r = bpf_redirect(*ifindex, 0);
-	bpf_printk("bpf_redirect to %d: return %d", *ifindex, r);
-	return r;
+	//swap_src_dst_mac(data);
+	change_src(data);
+	return bpf_redirect(*ifindex, 0);
 }
 
 /* Redirect require an XDP bpf_prog loaded on the TX device */
 SEC("xdp_redirect_dummy")
 int xdp_redirect_dummy_prog(struct xdp_md *ctx)
 {
-
-	bpf_printk("bpf_redirect_dummy: XXXXX");
 	return XDP_PASS;
 }
 
