@@ -5,11 +5,14 @@ set -e -o pipefail
 # Changelogs
 #==================================
 # 2022/06/30: Version 0.6: First release
+# 2022/07/13: Version 0.7: Re-structure
 
 VERSION="0.6"
 
 NAME_PREFIX="pai-box"
 TYPE="nop"
+
+ACTION=
 
 function _nsenter() {
     /usr/bin/nsenter "$@"
@@ -347,34 +350,9 @@ function remove_static_port_forward() {
     done
 }
 
-function init_host() {
-    log ">>> INIT-HOST"
-    local DEVICE=$1
-
-    if [ "$DEVICE" == "ALL" ]; then
-        DEVICE=$(find_netdev)
-        log "ALL interface: $DEVICE"
-    fi
-
-    if [ -z "$DEVICE" ]; then
-        log "Error: device is not specified"
-        exit 1
-    fi
 
 
-    # Adjust port range to 32768,60999, which is default settings.
-    sysctl net.ipv4.ip_local_port_range="32768 60999"
-    # This for L3 forward support. (L2 redirect mode don't need it)
-    sysctl net.ipv4.conf.all.accept_local=1
-    sysctl net.ipv4.conf.all.rp_filter=0
-
-    # Build up the tc filter structure for all rules.
-    init_filter_ht "$DEVICE"
-
-    skip_host_port_redirect "$DEVICE"
-}
-
-function skip_host_port_redirect() {
+function set_host_static_ports() {
     local DEVICE=$1
     # scan all listening ports, and don't redirect them if they are in redirection port range: 8192 ~ 32767
     local listen_ports
@@ -398,7 +376,7 @@ function skip_host_port_redirect() {
         exit 1
     fi
 
-    log "Host ports need skip redirect: $rule_ports"
+    log "Host static ports never redirect: $rule_ports"
     for PORT in $rule_ports; do 
         log "skip redirect host port: $PORT" 
         if ! echo "$PORT" | grep -q -E '^[0-9]+$'; then
@@ -407,7 +385,7 @@ function skip_host_port_redirect() {
         fi
         # Check duplication
         if tc filter show dev "$DEVICE" ingress protocol ip pref 1 | grep '1::8[0-9][0-9]' -A1 | grep -q $(printf "%08x/0000ffff" $PORT); then
-            log "  host port $PORT, already added rule"
+            log "  host port $PORT, already added rule, skip"
             continue
         fi
  
@@ -423,9 +401,9 @@ function skip_host_port_redirect() {
 }
 
 function update_reserved_ports() {
-    local DEV=$1
+    local DEVICE$1
     local reserved_hex_ports
-    reserved_hex_ports=$(tc filter show dev $DEV ingress | (grep -E "fh 1::([0-9] |[0-9][0-9] |[0-7][0-9][0-9] )" -A1 || true) | awk '/match/ { if(match($0, "([0-9a-f]{8})/", a)) print a[1]}')
+    reserved_hex_ports=$(tc filter show dev $DEVICE ingress | (grep -E "fh 1::([0-9] |[0-9][0-9] |[0-7][0-9][0-9] )" -A1 || true) | awk '/match/ { if(match($0, "([0-9a-f]{8})/", a)) print a[1]}')
     reserved_hex_ports=${reserved_hex_ports//$'\n'/ }
     local reserved_ports
     for p in $reserved_hex_ports; do
@@ -443,9 +421,15 @@ function update_reserved_ports() {
     done
 }
 
-function init_filter_ht() {
-    log ">>> INIT-FILTER-HASHTABLE"
+function init_device_filter() {
+    log ">>> INIT DEVICE FILTER"
     local DEVICE=$1
+
+    if [ "$DEVICE" == "ALL" ]; then
+        DEVICE=$(find_netdev)
+        log "ALL interface: $DEVICE"
+    fi
+
     if ! (tc qdisc show dev "$DEVICE" ingress | grep -q ingress); then
         log "Create $DEVICE ingress qdisc"
         tc qdisc add dev "$DEVICE" handle ffff: ingress
@@ -472,6 +456,33 @@ function init_filter_ht() {
     tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 800::3 u32 ht 800:: match ip protocol 1 0xFF link 3:
     tc filter replace dev "$DEVICE" parent ffff: protocol arp prio 4 handle 801::1 u32 ht 801:: match u32 0 0 link 4:
 
+    set_host_static_ports "$DEVICE"
+
+}
+
+function clear_device_filter() {
+    log ">>> CLEAR DEVICE FILTER"
+    local DEVICE=$1
+
+    if [ "$DEVICE" == "ALL" ]; then
+        DEVICE=$(find_netdev)
+        log "ALL interface: $DEVICE"
+    fi
+
+    tc qdisc del dev "$DEVICE" ingress || true
+}
+
+function init_host() {
+    log "INIT-HOST"
+    # Adjust port range to 32768,60999, which is default settings.
+    sysctl net.ipv4.ip_local_port_range="32768 60999"
+    # This for L3 forward support. (L2 redirect mode don't need it)
+    sysctl net.ipv4.conf.all.accept_local=1
+    sysctl net.ipv4.conf.all.rp_filter=0
+}
+
+function clear_host() {
+    log "CLEAR-HOST: nothing"
 }
 
 function find_all_box() {
@@ -538,11 +549,17 @@ function add_box() {
     start_container "$NAME" "$IMAGE" "$@"
 }
 
-function init_box() {
+function del_box() {
+    local NAME=$1
+    remove_box_link "$NAME" ALL
+    docker rm -f "$NAME"
+}
+
+function create_box_link() {
     log ">>> INIT BOX"
     local NAME=$1
-    local DEV=$2
-    if [ -z "$DEV" ] || [ -z "$NAME" ] ; then
+    local DEVICE=$2
+    if [ -z "$DEVICE" ] || [ -z "$NAME" ] ; then
         help
     fi
 
@@ -551,14 +568,14 @@ function init_box() {
         exit 1
     fi
 
-    if [ "$DEV" == "ALL" ]; then
-        DEV=$(find_netdev)
-        log "ALL interface: $DEV"
+    if [ "$DEVICE" == "ALL" ]; then
+        DEVICE=$(find_netdev)
+        log "ALL interface: $DEVICE"
     fi
 
-
     # Always init the host fitler hash table.
-    init_host "$DEV"
+    init_host
+    init_device_filter "$DEVICE"
  
     log "Find boxid for the container..."
     local BOXID
@@ -577,23 +594,23 @@ function init_box() {
     fi
 
     log "Using box idx: $BOXID for container: $NAME"
-    init_container_net  "$BOXID" "$NAME" "$DEV" 
-    add_dynamic_port_forward "$BOXID" "$DEV" 
-    add_arp_forward "$BOXID" "$DEV" continue   
-    add_icmp_forward "$BOXID" "$DEV" continue
+    init_container_net  "$BOXID" "$NAME" "$DEVICE" 
+    add_dynamic_port_forward "$BOXID" "$DEVICE" 
+    add_arp_forward "$BOXID" "$DEVICE" continue   
+    add_icmp_forward "$BOXID" "$DEVICE" continue
 }
 
-function uninit_box() {
-    log ">>> UNINIT-BOX"
+function remove_box_link() {
     local NAME=$1
-    local DEV=$2
-    if [ -z "$DEV" ] || [ -z "$NAME" ] ; then
+    local DEVICE=$2
+    log ">>> Remove box[$NAME] link: $DEVICE"
+    if [ -z "$DEVICE" ] || [ -z "$NAME" ] ; then
         help
     fi
 
-    if [ "$DEV" == "ALL" ]; then
-        DEV=$(find_netdev)
-        log "ALL interface: $DEV"
+    if [ "$DEVICE" == "ALL" ]; then
+        DEVICE=$(find_netdev)
+        log "ALL interface: $DEVICE"
     fi
 
 
@@ -606,12 +623,12 @@ function uninit_box() {
     fi
  
     log "Container: $NAME box id = $BOXID"
-    uninit_container_net "$BOXID" "$NAME" "$DEV"
-    remove_dynamic_port_forward "$BOXID" "$DEV"
-    remove_arp_forward "$BOXID" "$DEV"
-    remove_icmp_forward "$BOXID" "$DEV"
-    remove_static_port_forward "$BOXID" "$DEV"
-    update_reserved_ports "$DEV"
+    uninit_container_net "$BOXID" "$NAME" "$DEVICE"
+    remove_dynamic_port_forward "$BOXID" "$DEVICE"
+    remove_arp_forward "$BOXID" "$DEVICE"
+    remove_icmp_forward "$BOXID" "$DEVICE"
+    remove_static_port_forward "$BOXID" "$DEVICE"
+    update_reserved_ports "$DEVICE"
 }
 
 function find_container_boxid() {
@@ -637,20 +654,20 @@ function find_container_boxid() {
     fi
 }
 
-function add_ports() {
+function set_box_ports() {
     local NAME=$1
-    local DEV=$2
+    local DEVICE=$2
     shift 2
     local PORTS="$*"
-    if [ -z "$NAME" ] || [ -z "$DEV" ] || [ -z "$PORTS" ]; then
-        log "Usage: add-port <host dev> <ports> <container name>"
-        log "Example: add-port  eth0 3412,10456 net-1"
+    if [ -z "$NAME" ] || [ -z "$DEVICE" ] || [ -z "$PORTS" ]; then
+        log "Usage: $ACTION <host dev> <ports> <container name>"
+        log "Example: $ACTION  eth0 3412,10456 net-1"
         exit 1
     fi
 
-    if [ "$DEV" == "ALL" ]; then
-        DEV=$(find_netdev)
-        log "ALL interface: $DEV"
+    if [ "$DEVICE" == "ALL" ]; then
+        DEVICE=$(find_netdev)
+        log "ALL interface: $DEVICE"
     fi
 
     local BOXID
@@ -660,16 +677,16 @@ function add_ports() {
         exit 1
     fi
     log "Add static port to $NAME with id: $BOXID"
-    add_static_port_forward "$BOXID" "$NAME" "$DEV" "$PORTS"
+    add_static_port_forward "$BOXID" "$NAME" "$DEVICE" "$PORTS"
 
-    update_reserved_ports "$DEV"
+    update_reserved_ports "$DEVICE"
 }
 
 
 function list() {
-    local DEV=$1
+    local DEVICE=$1
 
-    if [ -z "$DEV" ]; then
+    if [ -z "$DEVICE" ]; then
         log "net dev is not specified"
         exit 1
     fi
@@ -684,8 +701,8 @@ function list() {
         else 
             MLINE+=" $LINE"
         fi
-    done <<< "$(tc filter show dev $DEV ingress)"
-    log "==========================$DEV======================="
+    done <<< "$(tc filter show dev $DEVICE ingress)"
+    log "==========================$DEVICE======================="
     for LINE in "${LINES[@]}"; do
         if [[ "$LINE" =~ fh[[:space:]]+(1::[0-9]?[0-9][[:space:]]|1::[1-7][0-9][0-9][[:space:]]).*match[[:space:]]([0-9a-f]{8}/[0-9a-f]{8}).*mirred[[:space:]]\((.*)\) ]]; then
             log "${BASH_REMATCH[1]}\t TCP REDIRECT PORT: ${BASH_REMATCH[2]}, ACTION: ${BASH_REMATCH[3]}"
@@ -742,26 +759,6 @@ function list() {
 
 }
 
-#===========================================================
-# interface function for integration with InstMgr
-#===========================================================
-
-# arg1: container name
-# arg2: device name
-function set_link_up() {
-    local C=$1
-    local DEV=$2
-    init_box "$DEV" "$C"
-}
-
-# arg1: container name
-# arg2: device name
-function set_link_down() {
-    local C=$1
-    local DEV=$2
-    uninit_box "$DEV" "$C"
-}
-
 function check_link() {
     local LOGTAG="check-link"
     if [ ${#@} -ne 2 ]; then
@@ -782,8 +779,6 @@ function help() {
     log "  $0 check-link <sandboxName> <link>"
     log "  $0 expose-ports <sandboxName> <link> <port1> <port2> <port3> eg: expose-ports pai-sbx-ubuntu-1 ppp0 8080 8081 8082" 
     log ""
-    log "standalone action: "
-    log "   init-host, add-box, init-box, add-port"
     exit 1
 }
 
@@ -792,38 +787,35 @@ function version() {
 }
 
 function main() {
-    local ACTION=$1
+    ACTION=$1
     if [ -n "$ACTION" ]; then shift 1; fi
     case $ACTION in 
     "list")
         list "$@"
         ;;
-    "init-host")
-        init_host "$@"
-        ;;
     "add-box")
         add_box "$@"
         ;;
-    "init-box")
-        init_box "$@"
-        ;;
-    "uninit-box")
-        uninit_box "$@"
-        ;;
-    "add-ports")
-        add_ports "$@"
+    "del-box")
+        del_box "$@"
         ;;
     "set-link-up")
-        init_box "$@"
+        create_box_link "$@"
         ;;
     "set-link-down")
-        uninit_box "$@"
+        remove_box_link "$@"
+        ;;
+    "expose-ports")
+        set_box_ports "$@"
+        ;;
+    "clear-device")
+        clear_device_filter "$@"
+        ;;
+    "clear-host")
+        clear_host "$@"
         ;;
     "check-link")
         check_link "$@"
-        ;;
-    "expose-ports")
-        add_ports "$@"
         ;;
     "type")
         _type "$@"
