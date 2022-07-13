@@ -46,12 +46,15 @@ function find_netdev() {
 # arg3: device
 function init_container_net() {
     log ">>> INIT-CONTAINER-NET"
-    local IPADDR MACADDR GW VETH
+    local IPADDR DEVICE_MAC GW VETH
     local IDX=$1
     local CONTAINER=$2
     local DEVICE=$3
 
-    GW=$(ip route | grep default | awk '{print $3}')
+    # Get default gateway
+    if [[ "$(ip route get 114.114.114.114 | head -n1)" =~ via\ ([0-9.]+)  ]]; then 
+        GW=${BASH_REMATCH[1]}; 
+    fi
     log "  Gateway: $GW"
 
     VETH="veth$IDX"
@@ -60,9 +63,13 @@ function init_container_net() {
     NETNS=$(docker inspect --format "{{.State.Pid}}" "${CONTAINER}")
     log "  NetNS: $NETNS"
 
-    IPADDR=$(ip -4 addr show dev "$DEVICE" | grep inet | awk '{print $2}')
-    MACADDR=$(ip link show dev "$DEVICE" | grep link | awk '{print $2}')
-    log "  Veth peer IP: $IPADDR MAC: $MACADDR"
+    IPADDR=$(ip -4 addr show dev "$DEVICE" | (grep inet | awk '{print $2}' || true))
+    if [ -z "$IPADDR" ]; then
+        log "  Can not find IP address of device: $DEVICE"
+        exit 1;
+    fi
+    DEVICE_MAC=$(ip link show dev "$DEVICE" | (grep -E -o 'link/ether [0-9a-f:]{17}' || true) | awk '{print $2}')
+    log "  Veth peer IP: $IPADDR MAC: $DEVICE_MAC"
 
     local PORT_START
     PORT_START=$(start_port_byid "$IDX")
@@ -81,7 +88,13 @@ function init_container_net() {
     log "  Setup container network interface: $VETH <---> virtual $DEVICE"
     _nsenter -t "$NETNS" -n ip link set "$DEVICE"
     _nsenter -t "$NETNS" -n ip addr add "$IPADDR" dev "$DEVICE"
-    _nsenter -t "$NETNS" -n ip link set dev "$DEVICE" address "$MACADDR"
+    # If host netdev don't have ethernet, such as PPP, fake one.
+    local DEVICE_NO_ETHER=0
+    if [ -z "$DEVICE_MAC" ]; then
+        DEVICE_MAC="12:12:12:12:12:12"
+        DEVICE_NO_ETHER=1
+    fi
+    _nsenter -t "$NETNS" -n ip link set dev "$DEVICE" address "$DEVICE_MAC"
     _nsenter -t "$NETNS" -n ip link set "$DEVICE" up
     _nsenter -t "$NETNS" -n ip route replace "$GW" dev "$DEVICE"
     _nsenter -t "$NETNS" -n ip route replace default via "$GW" dev "$DEVICE"
@@ -89,14 +102,29 @@ function init_container_net() {
     _nsenter -t "$NETNS" -n sysctl net.ipv4.icmp_echo_ignore_all=1
     _nsenter -t "$NETNS" -n sysctl net.ipv4.conf.all.arp_ignore=8
     ip link set "$VETH" up
+    sysctl net.ipv4.conf.${VETH}.rp_filter=0
 
     # [net]<--[egress (Host Dev)]<--!!REDIRECT!!<--[(veth host)ingress]<--vlink<--[egress (veth peer)]<--[process]
     log "  Forward container ALL traffic from $CONTAINER to host $DEVICE"
     tc qdisc replace dev "$VETH" handle ffff: ingress
-    tc filter replace dev "$VETH" parent ffff: protocol ip prio 1 u32 match u32 0 0 action mirred egress redirect dev "${DEVICE}"
-    tc filter replace dev "$VETH" parent ffff: protocol arp u32 match u32 0 0 action mirred egress redirect dev "${DEVICE}"
-    tc filter replace dev "$VETH" parent ffff: protocol ip prio 1 u32 match ip protocol 1 0xFF action mirred egress redirect dev "$DEVICE"
+    if [ "$DEVICE_NO_ETHER" -eq 0 ]; then
+        tc filter replace dev "$VETH" parent ffff: protocol ip prio 1 u32 match u32 0 0 \
+            action mirred egress redirect dev "${DEVICE}"
+        tc filter replace dev "$VETH" parent ffff: protocol arp u32 match u32 0 0 action mirred egress redirect dev "${DEVICE}"
+    else
+        # If host dev has no L2 header(PPP), ARP not work, need add static one, any fake MAC can be used, we use host veth MAC. 
+        # This is OK, because the L2 will be remove before redirect.
+        local VETH_MAC
+        VETH_MAC=$(ip link show dev "$VETH" | (grep -E -o "link/ether [0-9a-f:]{17}" || true) | awk '{print $2}')
+        _nsenter -t "$NETNS" -n ip neigh del "$GW" dev "$DEVICE" 2>/dev/null || true
+        _nsenter -t "$NETNS" -n ip neigh add "$GW" dev "$DEVICE" lladdr "$VETH_MAC"
 
+        # The host dev don't have mac address, use ebpf to remove ether header
+        tc filter replace dev "$VETH" parent ffff: protocol ip prio 1 u32 match u32 0 0 \
+	        action bpf obj ./tc_push_ether.bpf.o sec pull_ether \
+            action mirred egress redirect dev "${DEVICE}"
+        # The physical device don't have mac address, don't mirror ARP to it, useless.
+    fi
 }   
 
 function uninit_container_net() {
@@ -135,11 +163,31 @@ function add_dynamic_port_forward() {
         exit 1
     fi
 
+    local VETH_MAC
+    VETH_MAC=$(ip link show dev "$VETH" | (grep -E -o "link/ether [0-9a-f:]{17}" || true) | awk '{print $2}')
+    local PEER_MAC DEVICE_MAC
+    DEVICE_MAC=$(ip link show dev "$DEVICE" | (grep -E -o "link/ether [0-9a-f:]{17}" || true) | awk '{print $2}')
+
     # [net]-->[ingress (Host Dev)]-->!!REDIRECT!!-->[(veth host)egress]-->vlink-->[ingress (veth peer) ]-->[process]
     log "Forward Dynamic port range $PORT_RANGE to boxid $IDX"
     # Even use replace, must specify full handle id. 
-    tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 1::$FIDX u32 ht 1: match tcp dst "$PORT_START" f000 action mirred egress redirect dev "$VETH"
-    tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 ht 2: match udp dst "$PORT_START" f000 action mirred egress redirect dev "$VETH"
+    if [ -n "$DEVICE_MAC" ]; then
+        tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 1::$FIDX u32 ht 1: match tcp dst "$PORT_START" f000 \
+            action mirred egress redirect dev "$VETH"
+        tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 ht 2: match udp dst "$PORT_START" f000 \
+            action mirred egress redirect dev "$VETH"
+    else
+        # Host device don't have mac address(PPP), we need build it, use faked MAC in sandbox netdev.
+        PEER_MAC="12:12:12:12:12:12"
+        tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 1::$FIDX u32 ht 1: match tcp dst "$PORT_START" f000 \
+	        action bpf obj ./tc_push_ether.bpf.o sec push_ether  \
+            action skbmod set dmac $PEER_MAC set smac  "$VETH_MAC" set etype 0x0800 \
+            action mirred egress redirect dev "$VETH"
+        tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 ht 2: match udp dst "$PORT_START" f000 \
+	        action bpf obj ./tc_push_ether.bpf.o sec push_ether \
+            action skbmod set dmac $PEER_MAC set smac  "$VETH_MAC" set etype 0x0800 \
+            action mirred egress redirect dev "$VETH"
+    fi
 }
 
 # arg1: boxid
@@ -184,8 +232,24 @@ function add_icmp_forward() {
     local VETH="veth$IDX"
     local FILTER_CONTINUE=$3
     log "Add Mirror ICMP to boxid: $IDX"
+
+    local VETH_MAC
+    VETH_MAC=$(ip link show dev "$VETH" | (grep -E -o "link/ether [0-9a-f:]{17}" || true) | awk '{print $2}')
+    local DEVICE_MAC
+    DEVICE_MAC=$(ip link show dev "$DEVICE" | (grep -E -o "link/ether [0-9a-f:]{17}" || true) | awk '{print $2}')
     # Even use replace, must specify full handle id. 
-    tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 3::$IDX u32 ht 3: match u32 0 0 action mirred egress mirror dev "$VETH" $FILTER_CONTINUE
+    if [ -n "$DEVICE_MAC" ]; then
+        tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 3::$IDX u32 ht 3: match u32 0 0 \
+            action mirred egress mirror dev "$VETH" $FILTER_CONTINUE
+    else
+        # Host dev has no L2, Need add new ether header before mirred to box
+        # Fixme: after push ether, can L3 correctly handle this pkt
+        PEER_MAC="12:12:12:12:12:12"
+        tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 3::$IDX u32 ht 3: match u32 0 0 \
+	        action bpf obj ./tc_push_ether.bpf.o sec push_ether \
+            action skbmod set dmac "$PEER_MAC" set smac  "$VETH_MAC" set etype 0x0800 \
+	        action mirred egress mirror dev "$VETH" $FILTER_CONTINUE
+    fi
 }
 
 function remove_icmp_forward() {
@@ -300,6 +364,9 @@ function init_host() {
 
     # Adjust port range to 32768,60999, which is default settings.
     sysctl net.ipv4.ip_local_port_range="32768 60999"
+    # This for L3 forward support. (L2 redirect mode don't need it)
+    sysctl net.ipv4.conf.all.accept_local=1
+    sysctl net.ipv4.conf.all.rp_filter=0
 
     # Build up the tc filter structure for all rules.
     init_filter_ht "$DEVICE"
@@ -512,7 +579,7 @@ function init_box() {
     log "Using box idx: $BOXID for container: $NAME"
     init_container_net  "$BOXID" "$NAME" "$DEV" 
     add_dynamic_port_forward "$BOXID" "$DEV" 
-    add_arp_forward "$BOXID" "$DEV" continue
+    add_arp_forward "$BOXID" "$DEV" continue   
     add_icmp_forward "$BOXID" "$DEV" continue
 }
 
@@ -701,9 +768,6 @@ function check_link() {
         log "$LOGTAG: usage: check-link pai-sbx-ubuntu-1 ppp0" 
         exit 1
     fi
-    local SANDBOX_CONTAINER=$1
-    local LINK=$2
-
     log "$LOGTAG: nothing to do, args: $*"
 }
 
