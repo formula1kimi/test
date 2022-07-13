@@ -276,41 +276,23 @@ function add_static_port_forward() {
     local FIDX_START=$(((IDX-1)*50))
     if [ $FIDX_START -eq 0 ]; then FIDX_START=1; fi
     local FIDX_END=$((FIDX_START+49))
-    local H=$((FIDX_START / 100))
-    local D
-    if [ $((FIDX_START - 100*H)) -lt 50 ]; then 
-        D="[0-4][0-9]"
-    else 
-        D="[5-9][0-9]"
-    fi
-    if [ "$H" -eq 0 ]; then 
-        H="";
-        if [ $FIDX_START -lt 50 ]; then 
-            D="[0-4]?[0-9]"
-        fi
-    fi
-
-    FIDX=$(tc filter  show dev "$DEVICE" ingress  protocol ip pref 1 | (grep -E -o "1::$H$D " || true) | cut -b4- | sort -n | tail -n1)
-    if [ -z "$FIDX" ]; then
-        FIDX=$FIDX_START
-    else
-        FIDX=$((FIDX+1))
-    fi
-
-    if [ $FIDX -gt $FIDX_END ]; then
-        log "Error, filter index for static port forward exceed $FIDX_END, abort"
-        exit 1
-    fi
-
-
+    local FIDX=$FIDX_START
+    # flush all rule entry
+    log "Flush static port redirect rule from $FIDX_START to $FIDX_END:"
+    for (( FIDX=FIDX_START; FIDX<=FIDX_END; FIDX++ )); do 
+        tc filter del dev "$DEVICE" parent ffff: protocol ip prio 1 handle 1::$FIDX u32 2>/dev/null || true
+        tc filter del dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 2>/dev/null || true
+    done
+    # Add new rule
+    FIDX=$FIDX_START
     for PORT in ${STATIC_PORTS}; do 
         log "Redirect static port $PORT to container $CONTAINER" 
         if ! echo "$PORT" | grep -q -E '^[0-9]+$'; then
             log "Bad port number: $PORT, skip"
             continue
         fi
-        tc filter add dev "$DEVICE" parent ffff: protocol ip prio 1 handle 1::$FIDX u32 ht 1: match tcp dst "$PORT" 0xffff action mirred egress redirect dev "$VETH"
-        tc filter add dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 ht 2: match udp dst "$PORT" 0xffff action mirred egress redirect dev "$VETH"
+        tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 1::$FIDX u32 ht 1: match tcp dst "$PORT" 0xffff action mirred egress redirect dev "$VETH"
+        tc filter replace dev "$DEVICE" parent ffff: protocol ip prio 1 handle 2::$FIDX u32 ht 2: match udp dst "$PORT" 0xffff action mirred egress redirect dev "$VETH"
         FIDX=$((FIDX+1))
         if [ $FIDX -gt $FIDX_END ]; then
             log "Error, filter index for static port forward exceed $FIDX_END, abort"
