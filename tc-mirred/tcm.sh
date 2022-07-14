@@ -44,23 +44,34 @@ function find_netdev() {
     ip route show | grep default | grep -o -E "dev [^ ]+ " | awk '{print $2}'
 }
 
+function veth_name_of_box() {
+    local BOXID=$1
+    local DEVICE=$2
+    echo "v${BOXID}${DEVICE}"
+}
+
 # arg1: boxid
 # arg2: container name
 # arg3: device
 function init_container_net() {
     log ">>> INIT-CONTAINER-NET"
-    local IPADDR DEVICE_MAC GW VETH
+    local IPADDR DEVICE_MAC GW GW_METRIC VETH
     local IDX=$1
     local CONTAINER=$2
     local DEVICE=$3
 
-    # Get default gateway
-    if [[ "$(ip route get 114.114.114.114 | head -n1)" =~ via\ ([0-9.]+)  ]]; then 
+    # Get default gateway on this device
+    DEF_DEV_ROUTE="$(ip route | (grep -E -i "default .*dev $DEVICE" || true) | head -n1)" 
+    if [[ "$DEF_DEV_ROUTE" =~ via\ ([0-9.]+) ]]; then 
         GW=${BASH_REMATCH[1]}; 
     fi
-    log "  Gateway: $GW"
+    if [[ "$DEF_DEV_ROUTE" =~ (metric\ [0-9.]+) ]]; then 
+        GW_METRIC=${BASH_REMATCH[1]}; 
+    fi
 
-    VETH="veth$IDX"
+    log "  Device $DEVICE has gateway: $GW"
+
+    VETH=$(veth_name_of_box "$IDX" "$DEVICE")
     log "  Veth host: $VETH"
 
     NETNS=$(docker inspect --format "{{.State.Pid}}" "${CONTAINER}")
@@ -99,12 +110,25 @@ function init_container_net() {
     fi
     _nsenter -t "$NETNS" -n ip link set dev "$DEVICE" address "$DEVICE_MAC"
     _nsenter -t "$NETNS" -n ip link set "$DEVICE" up
-    _nsenter -t "$NETNS" -n ip route replace "$GW" dev "$DEVICE"
-    _nsenter -t "$NETNS" -n ip route replace default via "$GW" dev "$DEVICE"
+
+    # Add gateway if the device has
+    if [ -n "$GW" ]; then
+        # For device IP without subnet, need add dedicated route for it's gateway.
+        # For other case, system auto add subnet route, which already cover gateway.
+        if [[ "$IPADDR" =~ /32 ]]; then
+            _nsenter -t "$NETNS" -n ip route replace "$GW" dev "$DEVICE"
+        fi
+        _nsenter -t "$NETNS" -n ip route replace default via "$GW" dev "$DEVICE" $GW_METRIC
+    fi
     _nsenter -t "$NETNS" -n sysctl net.ipv4.ip_local_port_range="${PORT_RANGE/-/ }"
+
+    # Prevent duplicated ARP/ICMP reply from box
     _nsenter -t "$NETNS" -n sysctl net.ipv4.icmp_echo_ignore_all=1
     _nsenter -t "$NETNS" -n sysctl net.ipv4.conf.all.arp_ignore=8
+
     ip link set "$VETH" up
+
+    # If we use L3 route to forwarding pkt, need this.
     sysctl net.ipv4.conf.${VETH}.rp_filter=0
 
     # [net]<--[egress (Host Dev)]<--!!REDIRECT!!<--[(veth host)ingress]<--vlink<--[egress (veth peer)]<--[process]
@@ -135,7 +159,8 @@ function uninit_container_net() {
     local IDX=$1
     local CONTAINER=$2
     local DEVICE=$3
-    local VETH="veth$IDX"
+    local VETH
+    VETH=$(veth_name_of_box "$IDX" "$DEVICE")
     log "Veth host: $VETH"
         
     NETNS=$(docker inspect --format "{{.State.Pid}}" "${CONTAINER}")
@@ -151,7 +176,8 @@ function uninit_container_net() {
 function add_dynamic_port_forward() {
     local IDX=$1
     local DEVICE=$2
-    local VETH="veth$IDX"
+    local VETH
+    VETH=$(veth_name_of_box "$IDX" "$DEVICE")
 
     local PORT_START
     PORT_START=$(start_port_byid "$IDX")
@@ -198,7 +224,8 @@ function add_dynamic_port_forward() {
 function remove_dynamic_port_forward() {
     local IDX=$1
     local DEVICE=$2
-    local VETH="veth$IDX"
+    local VETH
+    VETH=$(veth_name_of_box "$IDX" "$DEVICE")
 
     # dynamic port range forwarding started from 900
     local FIDX=$((900+IDX))
@@ -214,7 +241,8 @@ function remove_dynamic_port_forward() {
 function add_arp_forward() {
     local IDX=$1
     local DEVICE=$2
-    local VETH="veth$IDX"
+    local VETH
+    VETH=$(veth_name_of_box "$IDX" "$DEVICE")
     local FILTER_CONTINUE=$3
     log "Add Mirror ARP to boxid: $IDX"
     # Even use replace, must specify full handle id. 
@@ -224,7 +252,8 @@ function add_arp_forward() {
 function remove_arp_forward() {
     local IDX=$1
     local DEVICE=$2
-    local VETH="veth$IDX"
+    local VETH
+    VETH=$(veth_name_of_box "$IDX" "$DEVICE")
     log "Remove Mirror ARP from boxid: $IDX"
     tc filter del dev "$DEVICE" parent ffff: protocol arp prio 4 handle 4::$IDX u32 || true
 }
@@ -232,7 +261,8 @@ function remove_arp_forward() {
 function add_icmp_forward() {
     local IDX=$1
     local DEVICE=$2
-    local VETH="veth$IDX"
+    local VETH
+    VETH=$(veth_name_of_box "$IDX" "$DEVICE")
     local FILTER_CONTINUE=$3
     log "Add Mirror ICMP to boxid: $IDX"
 
@@ -267,7 +297,8 @@ function add_static_port_forward() {
     local IDX=$1
     local CONTAINER=$2
     local DEVICE=$3
-    local VETH="veth$IDX"
+    local VETH
+    VETH=$(veth_name_of_box "$IDX" "$DEVICE")
     # local STATIC_PORTS="${STATIC_PORTS/,/ }"
     local STATIC_PORTS=$4
 
@@ -304,7 +335,8 @@ function add_static_port_forward() {
 function remove_static_port_forward() {
     local IDX=$1
     local DEVICE=$2
-    VETH="veth$IDX"
+    local VETH
+    VETH=$(veth_name_of_box "$IDX" "$DEVICE")
     
     # find the filter id range of this boxid
     local FIDX_START=$(((IDX-1)*50))
@@ -442,16 +474,22 @@ function init_device_filter() {
 
 }
 
-function clear_device_filter() {
-    log ">>> CLEAR DEVICE FILTER"
-    local DEVICE=$1
-
-    if [ "$DEVICE" == "ALL" ]; then
-        DEVICE=$(find_netdev)
-        log "ALL interface: $DEVICE"
+function clear_devices {
+    local DEVICES=$1
+    DEVICES="${DEVICES//,/ }"
+    if [ -z "$DEVICES" ]; then
+        help
     fi
 
-    tc qdisc del dev "$DEVICE" ingress || true
+    if [ "$DEVICES" == "ALL" ]; then
+        DEVICE=$(find_netdev)
+        log "ALL interface: $DEVICES"
+    fi
+
+    for D in $DEVICES; do
+        log "Clear device: $D"
+        tc qdisc del dev "$D" ingress || true
+    done
 }
 
 function init_host() {
@@ -469,7 +507,7 @@ function clear_host() {
 
 function find_all_box() {
     local boxes
-    boxes=$(docker ps | awk '//{if (match($NF, "^'"$NAME_PREFIX"'-.*$", a)) print a[0]}')
+    boxes=$(docker ps | awk '//{if (match($NF, "^'"$NAME_PREFIX"'.*$", a)) print a[0]}')
     boxes=${boxes//$'\n'/ }
     echo "$boxes"
 }
@@ -533,14 +571,32 @@ function add_box() {
 
 function del_box() {
     local NAME=$1
-    remove_box_link "$NAME" ALL
+    remove_box_links "$NAME" ALL
     docker rm -f "$NAME"
 }
 
-function create_box_link() {
-    log ">>> INIT BOX"
+function create_box_links() {
+    local NAME=$1
+    local DEVICES=$2
+    DEVICES="${DEVICES//,/ }"
+    if [ -z "$DEVICES" ] || [ -z "$NAME" ] ; then
+        help
+    fi
+
+    if [ "$DEVICES" == "ALL" ]; then
+        DEVICES=$(find_netdev)
+        log "ALL interface: $DEVICES"
+    fi
+
+    for D in $DEVICES; do
+        create_box_link_per_device "$NAME" "$D"
+    done
+}
+
+function create_box_link_per_device() {
     local NAME=$1
     local DEVICE=$2
+    log ">>> INIT BOX: $NAME WITH DEVICE: $DEVICE"
     if [ -z "$DEVICE" ] || [ -z "$NAME" ] ; then
         help
     fi
@@ -548,11 +604,6 @@ function create_box_link() {
     if ! docker ps --format "{{.ID}} {{.Names}}" | grep -q "$NAME"; then 
         log "Error: can not find container"
         exit 1
-    fi
-
-    if [ "$DEVICE" == "ALL" ]; then
-        DEVICE=$(find_netdev)
-        log "ALL interface: $DEVICE"
     fi
 
     # Always init the host fitler hash table.
@@ -582,19 +633,31 @@ function create_box_link() {
     add_icmp_forward "$BOXID" "$DEVICE" continue
 }
 
-function remove_box_link() {
+function remove_box_links() {
+    local NAME=$1
+    local DEVICES=$2
+    DEVICES="${DEVICES//,/ }"
+    if [ -z "$DEVICES" ] || [ -z "$NAME" ] ; then
+        help
+    fi
+
+    if [ "$DEVICES" == "ALL" ]; then
+        DEVICES=$(find_netdev)
+        log "ALL interface: $DEVICES"
+    fi
+
+    for D in $DEVICES; do
+        remove_box_link_per_device "$NAME" "$D"
+    done
+}
+
+function remove_box_link_per_device() {
     local NAME=$1
     local DEVICE=$2
     log ">>> Remove box[$NAME] link: $DEVICE"
     if [ -z "$DEVICE" ] || [ -z "$NAME" ] ; then
         help
     fi
-
-    if [ "$DEVICE" == "ALL" ]; then
-        DEVICE=$(find_netdev)
-        log "ALL interface: $DEVICE"
-    fi
-
 
     # Find a BOXID by prefix
     local BOXID
@@ -638,18 +701,31 @@ function find_container_boxid() {
 
 function set_box_ports() {
     local NAME=$1
-    local DEVICE=$2
-    shift 2
-    local PORTS="$*"
-    if [ -z "$NAME" ] || [ -z "$DEVICE" ] || [ -z "$PORTS" ]; then
-        log "Usage: $ACTION <host dev> <ports> <container name>"
-        log "Example: $ACTION  eth0 3412,10456 net-1"
-        exit 1
+    local DEVICES=$2
+    local PORTS=$3
+    DEVICES="${DEVICES//,/ }"
+    if [ -z "$DEVICES" ] || [ -z "$NAME" ] || [ -z "$PORTS" ]; then
+        help
     fi
 
-    if [ "$DEVICE" == "ALL" ]; then
-        DEVICE=$(find_netdev)
-        log "ALL interface: $DEVICE"
+    if [ "$DEVICES" == "ALL" ]; then
+        DEVICES=$(find_netdev)
+        log "ALL interface: $DEVICES"
+    fi
+
+    for D in $DEVICES; do
+        set_box_ports_per_device "$NAME" "$D" "$PORTS"
+    done
+}
+
+function set_box_ports_per_device() {
+    local NAME=$1
+    local DEVICE=$2
+    local PORTS="$3"
+    PORTS="${PORTS//,/ }"
+    log "Set box[$NAME] ports: $PORTS for device $DEVICE"
+    if [ -z "$NAME" ] || [ -z "$DEVICE" ] || [ -z "$PORTS" ]; then
+        help
     fi
 
     local BOXID
@@ -756,10 +832,9 @@ function _type() {
 
 function help() {
     log "Usage: $0 <action> [action args...]"
-    log "  $0 set-link-up <sandboxName> <link> eg: set-link-up pai-sbx-ubuntu-1 ppp0"
-    log "  $0 set-link-down <sandboxName> <link>"
-    log "  $0 check-link <sandboxName> <link>"
-    log "  $0 expose-ports <sandboxName> <link> <port1> <port2> <port3> eg: expose-ports pai-sbx-ubuntu-1 ppp0 8080 8081 8082" 
+    log "  $0 set-link-up <sandboxName> <link1,link2, ... > eg: set-link-up pai-sbx-ubuntu-1 eth0,eth1,eth2"
+    log "  $0 set-link-down <sandboxName> <link1,link2, ... >"
+    log "  $0 expose-ports <sandboxName> <link1,link2, ... > <port1,port2,... > eg: expose-ports pai-sbx-ubuntu-1 eth0,eth1 8080,8081,8082" 
     log ""
     exit 1
 }
@@ -782,16 +857,16 @@ function main() {
         del_box "$@"
         ;;
     "set-link-up")
-        create_box_link "$@"
+        create_box_links "$@"
         ;;
     "set-link-down")
-        remove_box_link "$@"
+        remove_box_links "$@"
         ;;
     "expose-ports")
         set_box_ports "$@"
         ;;
-    "clear-device")
-        clear_device_filter "$@"
+    "clear-devices")
+        clear_devices "$@"
         ;;
     "clear-host")
         clear_host "$@"
